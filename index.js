@@ -1,47 +1,49 @@
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
-const fs = require("fs");
+const { MongoClient } = require("mongodb");
 
 // ==========================================
 //   КОНФИГ
 // ==========================================
 const BOT_TOKEN     = process.env.BOT_TOKEN || "8598919388:AAFOH5qEHxyn7l9I7EfelQJKdtwjjR1JqVI";
 const ADMIN_ID      = parseInt(process.env.ADMIN_ID || "1427796260");
+const MONGODB_URI   = process.env.MONGODB_URI;
 const MESSAGE_NIGHT   = "😴 Килл пошёл спать";
 const MESSAGE_MORNING = "☀️ Килл проснулся";
-const DB_FILE = "/tmp/subscribers.json";
 
 // ==========================================
-//   БАЗА ПОДПИСЧИКОВ (JSON файл)
+//   MONGODB
 // ==========================================
-function loadSubscribers() {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-    }
-  } catch (e) {}
-  return [];
+let db;
+async function getDb() {
+  if (db) return db;
+  const client = new MongoClient(MONGODB_URI);
+  await client.connect();
+  db = client.db("killbot");
+  return db;
 }
 
-function saveSubscribers(subs) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(subs), "utf8");
-}
-
-function addSubscriber(from) {
-  const subs = loadSubscribers();
-  if (subs.find(s => s.id === from.id)) return false;
-  subs.push({
+async function addSubscriber(from) {
+  const col = (await getDb()).collection("subscribers");
+  const exists = await col.findOne({ id: from.id });
+  if (exists) return false;
+  await col.insertOne({
     id: from.id,
     username: from.username || "",
     first_name: from.first_name || "",
-    last_name: from.last_name || ""
+    last_name: from.last_name || "",
+    subscribed_at: new Date()
   });
-  saveSubscribers(subs);
   return true;
 }
 
-function getSubscribersList() {
-  const subs = loadSubscribers();
+async function loadSubscribers() {
+  const col = (await getDb()).collection("subscribers");
+  return col.find({}).toArray();
+}
+
+async function getSubscribersList() {
+  const subs = await loadSubscribers();
   if (subs.length === 0) return "📭 Подписчиков пока нет.";
   let list = `📋 *Подписчики* (${subs.length} чел.):\n\n`;
   subs.forEach((s, i) => {
@@ -88,8 +90,8 @@ function sendMessageWithBack(chatId, text) {
   });
 }
 
-function broadcastMessage(text) {
-  const subs = loadSubscribers();
+async function broadcastMessage(text) {
+  const subs = await loadSubscribers();
   subs.forEach(s => {
     bot.sendMessage(s.id, text).catch(err => console.log(`Ошибка ${s.id}: ${err.message}`));
   });
@@ -99,8 +101,8 @@ function broadcastMessage(text) {
 // ==========================================
 //   ВЕБХУК
 // ==========================================
-app.post(`/webhook`, (req, res) => {
-  res.sendStatus(200); // сразу отвечаем Telegram
+app.post("/webhook", async (req, res) => {
+  res.sendStatus(200);
 
   const update = req.body;
 
@@ -113,19 +115,19 @@ app.post(`/webhook`, (req, res) => {
     const msgId  = query.message.message_id;
 
     bot.answerCallbackQuery(query.id);
-
     if (userId !== ADMIN_ID) return;
 
     bot.deleteMessage(chatId, msgId).catch(() => {});
 
     if (data === "send_night") {
-      const count = broadcastMessage(MESSAGE_NIGHT);
+      const count = await broadcastMessage(MESSAGE_NIGHT);
       sendMessageWithBack(ADMIN_ID, `✅ «Ночь» отправлено ${count} подписчикам.`);
     } else if (data === "send_morning") {
-      const count = broadcastMessage(MESSAGE_MORNING);
+      const count = await broadcastMessage(MESSAGE_MORNING);
       sendMessageWithBack(ADMIN_ID, `✅ «Утро» отправлено ${count} подписчикам.`);
     } else if (data === "list_subs") {
-      sendMessageWithBack(ADMIN_ID, getSubscribersList());
+      const list = await getSubscribersList();
+      sendMessageWithBack(ADMIN_ID, list);
     } else if (data === "back_menu") {
       sendAdminMenu(ADMIN_ID);
     }
@@ -143,7 +145,7 @@ app.post(`/webhook`, (req, res) => {
     if (userId === ADMIN_ID) {
       sendAdminMenu(ADMIN_ID);
     } else {
-      const isNew = addSubscriber(msg.from);
+      const isNew = await addSubscriber(msg.from);
       bot.sendMessage(userId, isNew ? "✅ Вы подписались на уведомления!" : "👍 Вы уже подписаны!");
     }
     return;
@@ -164,8 +166,6 @@ app.get("/", (req, res) => res.send("Bot is running!"));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
-
-  // Устанавливаем вебхук автоматически
   const url = process.env.WEBHOOK_URL;
   if (url) {
     await bot.setWebHook(`${url}/webhook`);
