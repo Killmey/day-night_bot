@@ -1,3 +1,5 @@
+console.log("MONGODB_URI:", process.env.MONGODB_URI);
+
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 const { MongoClient } = require("mongodb");
